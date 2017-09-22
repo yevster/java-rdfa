@@ -5,8 +5,10 @@
  */
 package net.rootdev.javardfa;
 
-import java.io.IOException;
-import java.io.StringWriter;
+import net.rootdev.javardfa.uri.URIExtractor10;
+import net.rootdev.javardfa.uri.URIExtractor;
+import net.rootdev.javardfa.uri.IRIResolver;
+import net.rootdev.javardfa.literal.LiteralCollector;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.Iterator;
@@ -15,60 +17,56 @@ import java.util.List;
 import java.util.Set;
 import javax.xml.namespace.QName;
 import javax.xml.stream.XMLEventFactory;
-import javax.xml.stream.XMLEventReader;
-import javax.xml.stream.XMLEventWriter;
 import javax.xml.stream.XMLOutputFactory;
 import javax.xml.stream.XMLStreamException;
-import javax.xml.stream.XMLStreamWriter;
 import javax.xml.stream.events.Attribute;
 import javax.xml.stream.events.StartElement;
 import javax.xml.stream.events.XMLEvent;
 import org.xml.sax.Attributes;
 import org.xml.sax.ContentHandler;
+import org.xml.sax.ErrorHandler;
 import org.xml.sax.Locator;
 import org.xml.sax.SAXException;
+import org.xml.sax.SAXParseException;
 
 /**
  * @author Damian Steer <pldms@mac.com>
  */
-public class Parser implements ContentHandler {
-    
-    private final XMLOutputFactory outputFactory;
+public class Parser implements ContentHandler, ErrorHandler {
+
     private final XMLEventFactory eventFactory;
-    private final XMLEventReader reader;
     private final StatementSink sink;
     private final Set<Setting> settings;
-    private final Constants consts;
-    private final Resolver resolver;
-
-    private final StartElement fakeEnvelope;
+    private final LiteralCollector literalCollector;
+    private final URIExtractor extractor;
 
     public Parser(StatementSink sink) {
         this(   sink,
                 XMLOutputFactory.newInstance(),
                 XMLEventFactory.newInstance(),
-                new IRIResolver());
+                new URIExtractor10(new IRIResolver()));
     }
 
     public Parser(StatementSink sink,
             XMLOutputFactory outputFactory,
             XMLEventFactory eventFactory,
-            Resolver resolver) {
+            URIExtractor extractor) {
         this.sink = sink;
-        this.outputFactory = outputFactory;
         this.eventFactory = eventFactory;
-        this.reader = null;
         this.settings = EnumSet.noneOf(Setting.class);
-        this.consts = new Constants();
-        this.resolver = resolver;
+        this.extractor = extractor;
+        this.literalCollector = new LiteralCollector(this, eventFactory, outputFactory);
+
+        extractor.setSettings(settings);
 
         // Important, although I guess the caller doesn't get total control
         outputFactory.setProperty(XMLOutputFactory.IS_REPAIRING_NAMESPACES, true);
-
-        // Woodstox doesn't like producing xml fragments, so we wrap.
-        fakeEnvelope = eventFactory.createStartElement("", null, "fake");
     }
-
+    
+    public boolean isEnabled(Setting setting) {
+        return settings.contains(setting);
+    }
+    
     public void enable(Setting setting) {
         settings.add(setting);
     }
@@ -76,162 +74,179 @@ public class Parser implements ContentHandler {
     public void disable(Setting setting) {
         settings.remove(setting);
     }
-
+    
     public void setBase(String base) {
         this.context = new EvalContext(base);
+        if (isEnabled(Setting.OnePointOne)) context.setPrefixes(Constants.CORE_DEFAULT_PREFIXES);
+        sink.setBase(context.getBase());
     }
 
     EvalContext parse(EvalContext context, StartElement element)
             throws XMLStreamException {
+        String currentLanguage = context.language;
+        boolean inXHTML = Constants.xhtmlNS.equals(element.getName().getNamespaceURI());
+        
+        // Respect xml:base outside xhtml
+        if (element.getAttributeByName(Constants.xmlbaseNS) != null && !inXHTML) {
+            context.setBase(element.getAttributeByName(Constants.xmlbaseNS).getValue());
+            sink.setBase(context.getBase());
+        }
+        
+        if (Constants.base.equals(element.getName()) &&
+                element.getAttributeByName(Constants.href) != null) {
+            context.setBase(element.getAttributeByName(Constants.href).getValue());
+            sink.setBase(context.getBase());
+        }
+        
+        // The xml / html namespace matching is a bit ropey. I wonder if the html 5
+        // parser has a setting for this?
+        if (settings.contains(Setting.ManualNamespaces)) {
+            if (element.getAttributeByName(Constants.xmllang) != null) {
+                currentLanguage = element.getAttributeByName(Constants.xmllang).getValue();
+                if (currentLanguage.length() == 0) currentLanguage = null;
+            } else if (element.getAttributeByName(Constants.lang) != null) {
+                currentLanguage = element.getAttributeByName(Constants.lang).getValue();
+                if (currentLanguage.length() == 0) currentLanguage = null;
+            }
+        } else if (element.getAttributeByName(Constants.xmllangNS) != null) {
+            currentLanguage = element.getAttributeByName(Constants.xmllangNS).getValue();
+            if (currentLanguage.length() == 0) currentLanguage = null;
+        }
+        
+        if (settings.contains(Setting.OnePointOne)) {
+
+            if (element.getAttributeByName(Constants.vocab) != null) {
+                String vocab =
+                    element.getAttributeByName(Constants.vocab).getValue().trim();
+                // empty vocab removes default vocab
+                if (vocab.length() == 0) {
+                    context.vocab = null;
+                } else {
+                    context.vocab = vocab;
+                    emitTriples(context.base, Constants.rdfaUses, vocab);
+                }
+            }
+
+            if (element.getAttributeByName(Constants.prefix) != null) {
+                parsePrefixes(element.getAttributeByName(Constants.prefix).getValue(), context);
+            }
+        }
+        
+        String about = extractor.getURI(element, Constants.about, context);
+        String src = extractor.getURI(element, Constants.src, context);
+        String href = extractor.getURI(element, Constants.href, context);
+        String resource = extractor.getURI(element, Constants.resource, context);
+        String datatype = extractor.getURI(element, Constants.datatype, context);
+        Attribute contentAttr = element.getAttributeByName(Constants.content);
+        String content = (contentAttr == null) ? null : contentAttr.getValue();
+        
+        List<String> typeof = extractor.getURIs(element, Constants.typeof, context);
+        List<String> rel = extractor.getURIs(element, Constants.rel, context);
+        List<String> rev = extractor.getURIs(element, Constants.rev, context);
+        List<String> property = extractor.getURIs(element, Constants.property, context);
+        
+        if (settings.contains(Setting.OnePointOne)) {
+            return parse11(rev, rel, about, src, resource, href, context, inXHTML, 
+                    element, typeof, property, content, datatype, currentLanguage);
+        } else {
+            return parse10(rev, rel, about, src, resource, href, context, inXHTML,
+                    element, typeof, property, content, datatype, currentLanguage);
+        }
+    }
+
+    private EvalContext parse10(List<String> rev, List<String> rel, String about, String src, String resource, String href, EvalContext context, boolean inXHTML, StartElement element, List<String> typeof, List<String> property, String content, String datatype, String currentLanguage) {
         boolean skipElement = false;
         String newSubject = null;
         String currentObject = null;
         List<String> forwardProperties = new LinkedList();
         List<String> backwardProperties = new LinkedList();
-        String currentLanguage = context.language;
-        boolean langIsLang = context.langIsLang;
-
-        if (element.getAttributeByName(consts.xmllang) != null) {
-            currentLanguage = element.getAttributeByName(consts.xmllang).getValue();
-        }
-
-        if (settings.contains(Setting.ManualNamespaces) &&
-                element.getAttributeByName(consts.fakeXmlLang) != null &&
-                !langIsLang) {
-            currentLanguage = element.getAttributeByName(consts.fakeXmlLang).getValue();
-        }
-
-        if (settings.contains(Setting.ManualNamespaces) &&
-                element.getAttributeByName(consts.lang) != null) {
-            langIsLang = true;
-            currentLanguage = element.getAttributeByName(consts.lang).getValue();
-        }
-
-        if (consts.base.equals(element.getName()) &&
-                element.getAttributeByName(consts.href) != null) {
-            context.setBase(element.getAttributeByName(consts.href).getValue());
-        }
-
-        if (element.getAttributeByName(consts.rev) == null &&
-                element.getAttributeByName(consts.rel) == null) {
-            Attribute nSubj = findAttribute(element, consts.about, consts.src, consts.resource, consts.href);
-            if (nSubj != null) {
-                newSubject = getURI(context.base, element, nSubj);
-            } else {
-                if (element.getAttributeByName(consts.typeof) != null) {
-                    if (consts.body.equals(element.getName()) ||
-                            consts.head.equals(element.getName())) {
-                        newSubject = context.base;
-                    } else {
-                        newSubject = createBNode();
-                    }
+        
+        if (rev == null && rel == null) {
+            newSubject = coalesce(about, src, resource, href);
+            if (newSubject == null) {
+                if (context.parent == null && !inXHTML) {
+                    newSubject = context.base;
+                } else if (Constants.body.equals(element.getName()) ||
+                            Constants.head.equals(element.getName())) {
+                    newSubject = context.base;
+                } else if (typeof != null) {
+                    newSubject = createBNode();
                 } else {
                     if (context.parentObject != null) {
                         newSubject = context.parentObject;
                     }
-                    if (element.getAttributeByName(consts.property) == null) {
+                    if (property == null) {
                         skipElement = true;
                     }
                 }
             }
         } else {
-            Attribute nSubj = findAttribute(element, consts.about, consts.src);
-            if (nSubj != null) {
-                newSubject = getURI(context.base, element, nSubj);
-            } else {
-                // if element is head or body assume about=""
-                if (consts.head.equals(element.getName()) ||
-                        consts.body.equals(element.getName())) {
+            newSubject = coalesce(about, src);
+            if (newSubject == null) {
+                if (context.parent == null && !inXHTML) {
                     newSubject = context.base;
-                } else if (element.getAttributeByName(consts.typeof) != null) {
+                } else if (Constants.head.equals(element.getName()) ||
+                        Constants.body.equals(element.getName())) {
+                    newSubject = context.base;
+                } else if (typeof != null) {
                     newSubject = createBNode();
                 } else if (context.parentObject != null) {
                     newSubject = context.parentObject;
                 }
             }
-            Attribute cObj = findAttribute(element, consts.resource, consts.href);
-            if (cObj != null) {
-                currentObject = getURI(context.base, element, cObj);
-            }
+            currentObject = coalesce(resource, href);
         }
 
-        if (newSubject != null && element.getAttributeByName(consts.typeof) != null) {
-            List<String> types = getURIs(context.base, element, element.getAttributeByName(consts.typeof));
-            for (String type : types) {
+        if (newSubject != null && typeof != null) {
+            for (String type : typeof) {
                 emitTriples(newSubject,
-                        consts.rdfType,
+                        Constants.rdfType,
                         type);
             }
         }
 
-        if (newSubject == null) {
-            newSubject = context.parentSubject;
-        }
-
         // Dodgy extension
         if (settings.contains(Setting.FormMode)) {
-            if (consts.form.equals(element.getName())) {
-                emitTriples(newSubject, consts.rdfType, "http://www.w3.org/1999/xhtml/vocab/#form"); // Signal entering form
+            if (Constants.form.equals(element.getName())) {
+                emitTriples(newSubject, Constants.rdfType, "http://www.w3.org/1999/xhtml/vocab/#form"); // Signal entering form
             }
-            if (consts.input.equals(element.getName()) &&
-                    element.getAttributeByName(consts.name) != null) {
-                currentObject = "?" + element.getAttributeByName(consts.name).getValue();
+            if (Constants.input.equals(element.getName()) &&
+                    element.getAttributeByName(Constants.name) != null) {
+                currentObject = "?" + element.getAttributeByName(Constants.name).getValue();
             }
 
         }
-
-        if (currentObject != null) {
-            if (element.getAttributeByName(consts.rel) != null) {
-                emitTriples(newSubject,
-                        getURIs(context.base, element, element.getAttributeByName(consts.rel)),
-                        currentObject);
+        
+        if (property != null) {
+            
+            if (content != null) { // The easy bit
+                if (datatype == null || datatype.length() == 0) {
+                    emitTriplesPlainLiteral(newSubject, property, content, currentLanguage);
+                } else {
+                    emitTriplesDatatypeLiteral(newSubject, property, content, datatype);
+                }
+            } else {
+                literalCollector.collect(newSubject, property, datatype, currentLanguage);
             }
-            if (element.getAttributeByName(consts.rev) != null) {
-                emitTriples(currentObject,
-                        getURIs(context.base, element, element.getAttributeByName(consts.rev)),
-                        newSubject);
+        }
+        
+        if (currentObject != null) {
+            if (element.getAttributeByName(Constants.rel) != null) {
+                emitTriples(newSubject, rel, currentObject);
+            }
+            if (element.getAttributeByName(Constants.rev) != null) {
+                emitTriples(currentObject, rev, newSubject);
             }
         } else {
-            if (element.getAttributeByName(consts.rel) != null) {
-                forwardProperties.addAll(getURIs(context.base, element, element.getAttributeByName(consts.rel)));
+            if (element.getAttributeByName(Constants.rel) != null) {
+                forwardProperties.addAll(rel);
             }
-            if (element.getAttributeByName(consts.rev) != null) {
-                backwardProperties.addAll(getURIs(context.base, element, element.getAttributeByName(consts.rev)));
+            if (element.getAttributeByName(Constants.rev) != null) {
+                backwardProperties.addAll(rev);
             }
             if (!forwardProperties.isEmpty() || !backwardProperties.isEmpty()) {
                 // if predicate present
                 currentObject = createBNode();
-            }
-        }
-
-        // Getting literal values. Complicated!
-
-        if (element.getAttributeByName(consts.property) != null) {
-            List<String> props = getURIs(context.base, element, element.getAttributeByName(consts.property));
-            String dt = getDatatype(element);
-            if (element.getAttributeByName(consts.content) != null) { // The easy bit
-                String lex = element.getAttributeByName(consts.content).getValue();
-                if (dt == null || dt.length() == 0) {
-                    emitTriplesPlainLiteral(newSubject, props, lex, currentLanguage);
-                } else {
-                    emitTriplesDatatypeLiteral(newSubject, props, lex, dt);
-                }
-            } else {
-                level = 1;
-                theDatatype = dt;
-                literalWriter = new StringWriter();
-                litProps = props;
-                if (dt == null) // either plain or xml. defer decision
-                {
-                    queuedEvents = new LinkedList<XMLEvent>();
-                } else if (consts.xmlLiteral.equals(dt)) // definitely xml?
-                {
-                    XMLStreamWriter xsw = outputFactory.createXMLStreamWriter(literalWriter);
-                    //xmlWriter = outputFactory.createXMLEventWriter(literalWriter);
-                    xmlWriter = new CanonicalXMLEventWriter(xsw);
-                    xmlWriter.add(fakeEnvelope);
-                }
-
             }
         }
 
@@ -246,11 +261,8 @@ public class Parser implements ContentHandler {
         }
 
         EvalContext ec = new EvalContext(context);
-
         if (skipElement) {
             ec.language = currentLanguage;
-            ec.langIsLang = langIsLang;
-            ec.original = context.original;
         } else {
             if (newSubject != null) {
                 ec.parentSubject = newSubject;
@@ -267,57 +279,172 @@ public class Parser implements ContentHandler {
             }
 
             ec.language = currentLanguage;
-            ec.langIsLang = langIsLang;
             ec.forwardProperties = forwardProperties;
             ec.backwardProperties = backwardProperties;
         }
         return ec;
     }
 
-    private Attribute findAttribute(StartElement element, QName... names) {
-        for (QName aName : names) {
-            Attribute a = element.getAttributeByName(aName);
-            if (a != null) {
-                return a;
+    private EvalContext parse11(List<String> rev, List<String> rel, String about, String src, String resource, String href, EvalContext context, boolean inXHTML, StartElement element, List<String> typeof, List<String> property, String content, String datatype, String currentLanguage) {
+        boolean skipElement = false;
+        String newSubject = null;
+        String currentObject = null;
+        String typedResource = null;
+        List<String> forwardProperties = new LinkedList();
+        List<String> backwardProperties = new LinkedList();
+        
+        if (rev == null && rel == null) {
+            if (property != null && content == null && datatype == null) {
+                if (about != null && about != URIExtractor.NONE) newSubject = about;
+                else if (context.parent == null) newSubject = context.base;
+                else if (context.parentObject != null) newSubject = context.parentObject;
+                
+                if (typeof != null) {
+                    if (about != null && about != URIExtractor.NONE) typedResource = about;
+                    else if (context.parent == null) typedResource = context.base;
+                    else typedResource = coalesce(resource, href, src);
+                    
+                    if (typedResource == null) typedResource = createBNode();
+                                        
+                    currentObject = typedResource;
+                }
+            } else {
+                newSubject = coalesce(about, resource, href, src);
+                                
+                if (newSubject == null) {
+                    if (context.parent == null) newSubject = context.base;
+                    else if (typeof != null) newSubject = createBNode();
+                    else if (context.parentObject != null) {
+                        newSubject = context.parentObject;
+                        if (property == null) skipElement = true;
+                    }
+                }
+                
+                if (typeof != null) typedResource = newSubject;
+            }
+        } else { // rev or rel present
+            if (about != null && about != URIExtractor.NONE) newSubject = about;
+            if (typeof != null) typedResource = newSubject;
+            
+            if (newSubject == null) {
+                if (context.parent == null) newSubject = context.base;
+                else if (context.parentObject != null) newSubject = context.parentObject;
+            }
+            
+            currentObject = coalesce(resource, href, src);
+            
+            if (currentObject == null && typeof != null && about == null) currentObject = createBNode();
+            
+            if (typeof != null && about == null) typedResource = currentObject;
+        }
+        
+        if (typedResource != null) {
+            for (String type : typeof) {
+                emitTriples(typedResource,
+                        Constants.rdfType,
+                        type);
             }
         }
-        return null;
+        
+        // STEP 8 skipped... list etc
+        
+        if (currentObject != null) {
+            if (rel != null) emitTriples(newSubject, rel, currentObject);
+            if (rev != null) emitTriples(currentObject, rev, newSubject);
+        } else {
+            // Do I really want to add all here, or simply assign???
+            if (rel != null) forwardProperties.addAll(rel);
+            if (rev != null) backwardProperties.addAll(rev);
+            if (rev != null || rel != null) currentObject = createBNode();
+        }
+        
+        if (property != null) {
+                        
+            String propertyValue = null;
+            
+            if (content != null) { // The easy bit
+                if (datatype == null || datatype.length() == 0) {
+                    emitTriplesPlainLiteral(newSubject, property, content, currentLanguage);
+                } else {
+                    emitTriplesDatatypeLiteral(newSubject, property, content, datatype);
+                }
+                propertyValue = URIExtractor.NONE;
+            } else if (datatype != null) {
+                literalCollector.collect(newSubject, property, datatype, currentLanguage);
+                propertyValue = URIExtractor.NONE;
+            } else if (rev == null && rev == null && content == null) {
+                propertyValue = coalesce(resource, href, src);
+            }
+                        
+            if (propertyValue == null && typeof != null && about == null) {
+                propertyValue = typedResource;
+            }
+            
+            if (propertyValue == null && content == null && datatype == null) {
+                literalCollector.collect(newSubject, property, datatype, currentLanguage);
+            }
+            
+            if (propertyValue != null && propertyValue != URIExtractor.NONE) emitTriples(newSubject, property, propertyValue);
+        }
+        
+        if (!skipElement && newSubject != null) {
+            emitTriples(context.parentSubject,
+                    context.forwardProperties,
+                    newSubject);
+
+            emitTriples(newSubject,
+                    context.backwardProperties,
+                    context.parentSubject);
+        }
+        
+        EvalContext ec = new EvalContext(context);
+        if (skipElement) {
+            ec.language = currentLanguage;
+        } else {
+            if (newSubject != null) {
+                ec.parentSubject = newSubject;
+            } else {
+                ec.parentSubject = context.parentSubject;
+            }
+
+            if (currentObject != null) {
+                ec.parentObject = currentObject;
+            } else if (newSubject != null) {
+                ec.parentObject = newSubject;
+            } else {
+                ec.parentObject = context.parentSubject;
+            }
+
+            ec.language = currentLanguage;
+            ec.forwardProperties = forwardProperties;
+            ec.backwardProperties = backwardProperties;
+        }
+        return ec;
     }
 
-    private void emitTriples(String subj, Collection<String> props, String obj) {
+    public void emitTriples(String subj, Collection<String> props, String obj) {
         for (String prop : props) {
-            sink.addObject(subj, prop, obj);
+            if (!prop.startsWith("_")) sink.addObject(subj, prop, obj);
         }
     }
 
-    private void emitTriplesPlainLiteral(String subj, Collection<String> props, String lex, String language) {
+    public void emitTriplesPlainLiteral(String subj, Collection<String> props, String lex, String language) {
         for (String prop : props) {
-            sink.addLiteral(subj, prop, lex, language, null);
+            if (!prop.startsWith("_")) sink.addLiteral(subj, prop, lex, language, null);
         }
     }
 
-    private void emitTriplesDatatypeLiteral(String subj, Collection<String> props, String lex, String datatype) {
+    public void emitTriplesDatatypeLiteral(String subj, Collection<String> props, String lex, String datatype) {
         for (String prop : props) {
-            sink.addLiteral(subj, prop, lex, null, datatype);
+            if (!prop.startsWith("_")) sink.addLiteral(subj, prop, lex, null, datatype);
         }
     }
+
     int bnodeId = 0;
-
+    
     private String createBNode() // TODO probably broken? Can you write bnodes in rdfa directly?
     {
         return "_:node" + (bnodeId++);
-    }
-
-    private String getDatatype(StartElement element) {
-        Attribute de = element.getAttributeByName(consts.datatype);
-        if (de == null) {
-            return null;
-        }
-        String dt = de.getValue();
-        if (dt.length() == 0) {
-            return dt;
-        }
-        return expandCURIE(element, dt);
     }
 
     private void getNamespaces(Attributes attrs) {
@@ -352,15 +479,7 @@ public class Parser implements ContentHandler {
      * SAX methods
      */
     private Locator locator;
-    //private NSMapping mapping;
-    private EvalContext context; // = new EvalContext("BASE_NOT_SET");
-    // For literals (what fun!)
-    private List<XMLEvent> queuedEvents;
-    private int level = -1;
-    private XMLEventWriter xmlWriter;
-    private StringWriter literalWriter;
-    private String theDatatype;
-    private List<String> litProps;
+    private EvalContext context;
 
     public void setDocumentLocator(Locator arg0) {
         this.locator = arg0;
@@ -409,11 +528,10 @@ public class Parser implements ContentHandler {
                     prefix, arg0, localname,
                     fromAttributes(arg3), null, context);
 
-            if (level != -1) { // getting literal
-                handleForLiteral(e);
-                return;
-            }
-            context = parse(context, e);
+            if (literalCollector.isCollecting()) literalCollector.handleEvent(e);
+
+            // If we are gathering XML we stop parsing
+            if (!literalCollector.isCollectingXML()) context = parse(context, e);
         } catch (XMLStreamException ex) {
             throw new RuntimeException("Streaming issue", ex);
         }
@@ -422,31 +540,28 @@ public class Parser implements ContentHandler {
 
     public void endElement(String arg0, String localname, String qname) throws SAXException {
         //System.err.println("End element: " + arg0 + " " + arg1 + " " + arg2);
-        if (level != -1) { // getting literal
+        if (literalCollector.isCollecting()) {
             String prefix = (localname.equals(qname)) ? ""
                     : qname.substring(0, qname.indexOf(':'));
             XMLEvent e = eventFactory.createEndElement(prefix, arg0, localname);
-            handleForLiteral(e);
-            if (level != -1) {
-                return; // if still handling literal duck out now
-            }
+            literalCollector.handleEvent(e);
         }
-        context = context.parent;
+        // If we aren't collecting an XML literal keep parsing
+        if (!literalCollector.isCollectingXML()) context = context.parent;
     }
 
     public void characters(char[] arg0, int arg1, int arg2) throws SAXException {
-        if (level != -1) {
+        if (literalCollector.isCollecting()) {
             XMLEvent e = eventFactory.createCharacters(String.valueOf(arg0, arg1, arg2));
-            handleForLiteral(e);
-            return;
+            literalCollector.handleEvent(e);
         }
     }
 
     public void ignorableWhitespace(char[] arg0, int arg1, int arg2) throws SAXException {
         //System.err.println("Whitespace...");
-        if (level != -1) {
+        if (literalCollector.isCollecting()) {
             XMLEvent e = eventFactory.createIgnorableSpace(String.valueOf(arg0, arg1, arg2));
-            handleForLiteral(e);
+            literalCollector.handleEvent(e);
         }
     }
 
@@ -458,184 +573,67 @@ public class Parser implements ContentHandler {
 
     private Iterator fromAttributes(Attributes attributes) {
         List toReturn = new LinkedList();
-        boolean haveLang = false;
+        
         for (int i = 0; i < attributes.getLength(); i++) {
             String qname = attributes.getQName(i);
             String prefix = qname.contains(":") ? qname.substring(0, qname.indexOf(":")) : "";
             Attribute attr = eventFactory.createAttribute(
                     prefix, attributes.getURI(i),
                     attributes.getLocalName(i), attributes.getValue(i));
-            //if (consts.xmllang.getLocalPart().equals(attributes.getLocalName(i)) &&
-            //        consts.xmllang.getNamespaceURI().equals(attributes.getURI(i))) {
-            if (qname.equals("xml:lang")) {
-                haveLang = true;
-            }
 
             if (!qname.equals("xmlns") && !qname.startsWith("xmlns:"))
                 toReturn.add(attr);
         }
-        // Copy xml lang across if in literal
-        if (level == 1 && context.language != null && !haveLang) {
-            toReturn.add(eventFactory.createAttribute(consts.xmllang, context.language));
-        }
+        
         return toReturn.iterator();
     }
 
-    private void handleForLiteral(XMLEvent e) {
-        try {
-            handleForLiteralEx(e);
-        } catch (XMLStreamException ex) {
-            throw new RuntimeException("Literal handling error", ex);
-        } catch (IOException ex) {
-            throw new RuntimeException("Literal handling error", ex);
-        }
-    }
+    // 1.1 method
 
-    private void handleForLiteralEx(XMLEvent e) throws XMLStreamException, IOException {
-        if (e.isStartElement()) {
-            level++;
-            if (queuedEvents != null) { // Aha, we ain't plain
-                XMLStreamWriter xsw = outputFactory.createXMLStreamWriter(literalWriter);
-                //xmlWriter = outputFactory.createXMLEventWriter(literalWriter);
-                xmlWriter = new CanonicalXMLEventWriter(xsw);
-                xmlWriter.add(fakeEnvelope);
-                for (XMLEvent ev : queuedEvents) {
-                    xmlWriter.add(ev);
-                }
-                queuedEvents = null;
-                theDatatype = consts.xmlLiteral;
+    private void parsePrefixes(String value, EvalContext context) {
+        String[] parts = value.split("\\s+");
+        for (int i = 0; i < parts.length; i += 2) {
+            String prefix = parts[i];
+            if (i + 1 < parts.length && prefix.endsWith(":")) {
+                String prefixFix = prefix.substring(0, prefix.length() - 1);
+                context.setPrefix(prefixFix, parts[i+1]);
+                sink.addPrefix(prefixFix, parts[i+1]);
             }
         }
-
-        if (e.isEndElement()) {
-            level--;
-            if (level == 0) { // Finished!
-                if (xmlWriter != null) {
-                    xmlWriter.close();
-                } else if (queuedEvents != null) {
-                    for (XMLEvent ev : queuedEvents) {
-                        literalWriter.append(ev.asCharacters().getData());
-                    }
-                }
-                String lex = literalWriter.toString();
-                if (consts.xmlLiteral.equals(theDatatype)) {
-                    // Clean up fake doc root
-                    if (lex.startsWith("<fake>"))  lex = lex.substring(6);
-                    else if (lex.startsWith("<fake xmlns=\"\">")) lex = lex.substring(15);
-                    if (lex.endsWith("</fake>")) lex = lex.substring(0, lex.length() - 7);
-                }
-                if (theDatatype == null || theDatatype.length() == 0) {
-                    emitTriplesPlainLiteral(context.parentSubject,
-                            litProps, lex, context.language);
-                } else {
-                    emitTriplesDatatypeLiteral(context.parentSubject,
-                            litProps, lex, theDatatype);
-                }
-                queuedEvents = null;
-                xmlWriter = null;
-                literalWriter = null;
-                theDatatype = null;
-                litProps = null;
-                level = -1;
-                return;
-            }
-        }
-
-        if (xmlWriter != null) {
-            xmlWriter.add(e);
-        } else if (e.isCharacters() && queuedEvents != null) {
-            queuedEvents.add(e);
-        } else if (e.isCharacters()) {
-            literalWriter.append(e.asCharacters().getData());
-        }
+    }
+    
+    // SAX error handling
+    
+    public void warning(SAXParseException exception) throws SAXException {
+        System.err.printf("Warning: %s\n", exception.getLocalizedMessage());
     }
 
-    public String getURI(String base, StartElement element, Attribute attr) {
-        QName attrName = attr.getName();
-        if (attrName.equals(consts.href) || attrName.equals(consts.src)) // A URI
-        {
-            if (attr.getValue().length() == 0) return base;
-            else return resolver.resolve(base, attr.getValue());
-        }
-        if (attrName.equals(consts.about) || attrName.equals(consts.resource)) // Safe CURIE or URI
-        {
-            return expandSafeCURIE(base, element, attr.getValue());
-        }
-        if (attrName.equals(consts.datatype)) // A CURIE
-        {
-            return expandCURIE(element, attr.getValue());
-        }
-        throw new RuntimeException("Unexpected attribute: " + attr);
+    public void error(SAXParseException exception) throws SAXException {
+        System.err.printf("Error: %s\n", exception.getLocalizedMessage());
     }
 
-    public List<String> getURIs(String base, StartElement element, Attribute attr) {
-        List<String> uris = new LinkedList<String>();
-        String[] curies = attr.getValue().split("\\s+");
-        boolean permitReserved = consts.rel.equals(attr.getName()) ||
-                consts.rev.equals(attr.getName());
-        for (String curie : curies) {
-            if (consts.SpecialRels.contains(curie.toLowerCase())) {
-                if (permitReserved)
-                    uris.add("http://www.w3.org/1999/xhtml/vocab#" + curie.toLowerCase());
-            } else {
-                String uri = expandCURIE(element, curie);
-                if (uri != null) {
-                    uris.add(uri);
-                }
-            }
-        }
-        return uris;
+    public void fatalError(SAXParseException exception) throws SAXException {
+        System.err.printf("Fatal error: %s\n", exception.getLocalizedMessage());
     }
-
-    public String expandCURIE(StartElement element, String value) {
-        if (value.startsWith("_:")) {
-            if (!settings.contains(Setting.ManualNamespaces)) return value;
-            if (element.getNamespaceURI("_") == null) return value;
-        }
-        if (settings.contains(Setting.FormMode) && // variable
-                value.startsWith("?")) {
-            return value;
-        }
-        int offset = value.indexOf(":") + 1;
-        if (offset == 0) {
-            //throw new RuntimeException("Is this a curie? \"" + value + "\"");
-            return null;
-        }
-        String prefix = value.substring(0, offset - 1);
-
-        // Apparently these are not allowed to expand
-        if ("xml".equals(prefix) || "xmlns".equals(prefix)) return null;
-
-        String namespaceURI = prefix.length() == 0 ? "http://www.w3.org/1999/xhtml/vocab#" : element.getNamespaceURI(prefix);
-        if (namespaceURI == null) {
-            return null;
-            //throw new RuntimeException("Unknown prefix: " + prefix);
-        }
-        if (offset != value.length() && value.charAt(offset) == '#') {
-            offset += 1; // ex:#bar
-        }
-        if (namespaceURI.endsWith("/") || namespaceURI.endsWith("#")) {
-            return namespaceURI + value.substring(offset);
-        } else {
-            return namespaceURI + "#" + value.substring(offset);
-        }
+    
+    // Coalesce utility functions. Useful in parsing.
+    
+    private static <T> T coalesce(T a, T b) {
+        if (a != null && a != URIExtractor.NONE) return a;
+        return b;
     }
-
-    public String expandSafeCURIE(String base, StartElement element, String value) {
-        if (value.startsWith("[") && value.endsWith("]")) {
-            return expandCURIE(element, value.substring(1, value.length() - 1));
-        } else {
-            if (value.length() == 0) {
-                return base;
-            }
-
-            if (settings.contains(Setting.FormMode) &&
-                    value.startsWith("?")) {
-                return value;
-            }
-
-            return resolver.resolve(base, value);
-        }
+    
+    private static <T> T coalesce(T a, T b, T c) {
+        if (a != null && a != URIExtractor.NONE) return a;
+        if (b != null && b != URIExtractor.NONE) return b;
+        return c;
+    }
+    
+    private static <T> T coalesce(T a, T b, T c, T d) {
+        if (a != null && a != URIExtractor.NONE) return a;
+        if (b != null && b != URIExtractor.NONE) return b;
+        if (c != null && c != URIExtractor.NONE) return c;
+        return d;
     }
 }
 

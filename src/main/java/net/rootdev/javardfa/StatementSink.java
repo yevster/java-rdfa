@@ -13,6 +13,11 @@ package net.rootdev.javardfa;
 public interface StatementSink
 {
     /**
+     *
+     */
+    public void setBase(String base);
+
+    /**
      * Begin parsing
      */
     public void start();

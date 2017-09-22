@@ -5,6 +5,10 @@
  */
 package net.rootdev.javardfa;
 
+import net.rootdev.javardfa.uri.URIExtractor10;
+import net.rootdev.javardfa.uri.URIExtractor;
+import net.rootdev.javardfa.uri.URIExtractor11;
+import net.rootdev.javardfa.uri.IRIResolver;
 import javax.xml.stream.XMLEventFactory;
 import javax.xml.stream.XMLOutputFactory;
 import nu.validator.htmlparser.common.XmlViolationPolicy;
@@ -43,6 +47,9 @@ public class ParserFactory {
     public static XMLReader createNonvalidatingReader() throws SAXException {
         XMLReader reader = XMLReaderFactory.createXMLReader();
         reader.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        try {
+            reader.setFeature("http://www.xml.org/sax/features/validation", false);
+        } catch (Exception e) {} // continue whether this is recognised
         return reader;
     }
 
@@ -55,8 +62,6 @@ public class ParserFactory {
         reader.setXmlPolicy(XmlViolationPolicy.ALLOW);
         reader.setXmlnsPolicy(XmlViolationPolicy.ALLOW);
         reader.setMappingLangToXmlLang(false);
-        // Stream
-        reader.setStreamabilityViolationPolicy(XmlViolationPolicy.FATAL);
         return reader;
     }
 
@@ -70,8 +75,8 @@ public class ParserFactory {
      * @throws SAXException
      */
     public static XMLReader createReaderForFormat(StatementSink sink,
-            Format format) throws SAXException {
-        return createReaderForFormat(sink, format, new IRIResolver());
+            Format format, Setting... settings) throws SAXException {
+        return createReaderForFormat(sink, format, new IRIResolver(), settings);
     }
 
     /**
@@ -85,10 +90,16 @@ public class ParserFactory {
      * @throws SAXException
      */
     public static XMLReader createReaderForFormat(StatementSink sink,
-            Format format, Resolver resolver) throws SAXException {
+            Format format, Resolver resolver, Setting... settings) throws SAXException {
         XMLReader reader = getReader(format);
-        Parser parser = getParser(format, sink, resolver);
+        boolean is11 = false;
+        for (Setting setting: settings) if (setting == Setting.OnePointOne) is11 = true;
+        URIExtractor extractor = (is11) ?
+            new URIExtractor11(resolver) : new URIExtractor10(resolver);
+        Parser parser = getParser(format, sink, extractor);
+        for (Setting setting: settings) parser.enable(setting);
         reader.setContentHandler(parser);
+        reader.setErrorHandler(parser);
         return reader;
     }
 
@@ -101,18 +112,20 @@ public class ParserFactory {
         }
     }
 
-    private static Parser getParser(Format format, StatementSink sink, Resolver resolver) {
-        return getParser(format, sink, XMLOutputFactory.newInstance(), XMLEventFactory.newInstance(), resolver);
+    private static Parser getParser(Format format, StatementSink sink,
+            URIExtractor extractor) {
+        return getParser(format, sink, XMLOutputFactory.newInstance(), 
+                XMLEventFactory.newInstance(), extractor);
     }
 
     private static Parser getParser(Format format, StatementSink sink,
             XMLOutputFactory outputFactory, XMLEventFactory eventFactory,
-            Resolver resolver) {
+            URIExtractor extractor) {
         switch (format) {
             case XHTML:
-                return new Parser(sink, outputFactory, eventFactory, resolver);
+                return new Parser(sink, outputFactory, eventFactory, extractor);
             default:
-                Parser p = new Parser(sink, outputFactory, eventFactory, resolver);
+                Parser p = new Parser(sink, outputFactory, eventFactory, extractor);
                 p.enable(Setting.ManualNamespaces);
                 return p;
         }

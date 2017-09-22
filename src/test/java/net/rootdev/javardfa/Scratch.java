@@ -5,18 +5,22 @@
 
 package net.rootdev.javardfa;
 
+import net.rootdev.javardfa.jena.JenaStatementSink;
 import net.rootdev.javardfa.*;
-import com.hp.hpl.jena.query.Query;
-import com.hp.hpl.jena.query.QueryExecution;
-import com.hp.hpl.jena.query.QueryExecutionFactory;
-import com.hp.hpl.jena.query.QueryFactory;
-import com.hp.hpl.jena.rdf.model.Model;
-import com.hp.hpl.jena.rdf.model.ModelFactory;
-import com.hp.hpl.jena.util.FileManager;
+import org.apache.jena.query.Query;
+import org.apache.jena.query.QueryExecution;
+import org.apache.jena.query.QueryExecutionFactory;
+import org.apache.jena.query.QueryFactory;
+import org.apache.jena.rdf.model.Model;
+import org.apache.jena.rdf.model.ModelFactory;
+import org.apache.jena.util.FileManager;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Map;
+import java.util.Map.Entry;
 import javax.xml.stream.XMLInputFactory;
 import net.rootdev.javardfa.ParserFactory.Format;
+import net.rootdev.javardfa.output.OGPReader;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 import org.xml.sax.XMLReader;
@@ -31,11 +35,19 @@ public class Scratch {
     private static XMLInputFactory xmlFactory = XMLInputFactory.newInstance();
 
     public static void main(String[] args) throws SAXException, IOException, ClassNotFoundException {
-        String base = "http://rdfa.digitalbazaar.com/test-suite/test-cases/html5/";
-        String testHTML = base + "0121.html";
+        Map<String, String> prop = OGPReader.getOGP("http://uk.rottentomatoes.com/m/1217700-kick_ass", Format.HTML);
+
+        for (Entry<String, String> ent: prop.entrySet()) {
+            System.err.printf("[%s] => '%s'\n", ent.getKey(), ent.getValue());
+        }
+
+        if (true) return;
+
+        String base = "http://rdfa.digitalbazaar.com/test-suite/test-cases/xhtml1/";
+        String testHTML = base + "0121.xhtml";
         String testSPARQL = base + "0121.sparql";
 
-        check(testHTML, testSPARQL, Format.HTML);
+        check(testHTML, testSPARQL, Format.XHTML);
 
         //XMLReader parser = ParserFactory.createReaderForFormat(new NTripleSink(System.out), Format.HTML);
         //parser.parse(Scratch.class.getResource("/simple.html").toExternalForm());

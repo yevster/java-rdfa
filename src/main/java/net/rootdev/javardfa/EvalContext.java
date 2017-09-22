@@ -5,6 +5,7 @@
  */
 package net.rootdev.javardfa;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -12,18 +13,20 @@ import java.util.List;
 import java.util.Map;
 import javax.xml.namespace.NamespaceContext;
 
-class EvalContext implements NamespaceContext {
+public final class EvalContext implements NamespaceContext {
 
     EvalContext parent;
     String base;
     String parentSubject;
     String parentObject;
     String language;
+    String vocab;
     List<String> forwardProperties;
     List<String> backwardProperties;
-    Map<String, String> prefixToUri = new HashMap<String, String>();
-    boolean original;
-    boolean langIsLang = false;
+    Map<String, String> xmlnsMap = Collections.EMPTY_MAP;
+    Map<String, String> prefixMap = Collections.EMPTY_MAP;
+    Map<String, String> termMap = Collections.EMPTY_MAP;
+    Map<String, List<String>> listMap = Collections.EMPTY_MAP;
 
     protected EvalContext(String base) {
         super();
@@ -31,7 +34,6 @@ class EvalContext implements NamespaceContext {
         this.parentSubject = base;
         this.forwardProperties = new LinkedList<String>();
         this.backwardProperties = new LinkedList<String>();
-        original = true;
     }
 
     public EvalContext(EvalContext toCopy) {
@@ -42,22 +44,27 @@ class EvalContext implements NamespaceContext {
         this.language = toCopy.language;
         this.forwardProperties = new LinkedList<String>(toCopy.forwardProperties);
         this.backwardProperties = new LinkedList<String>(toCopy.backwardProperties);
-        this.langIsLang = toCopy.langIsLang;
-        this.original = false;
         this.parent = toCopy;
+        this.vocab = toCopy.vocab;
     }
 
     public void setBase(String abase) {
+        // This is very dodgy. We want to check if ps and po have been changed
+        // from their typical values (base).
+        // Base changing happens very late in the day when we're streaming, and
+        // it is very fiddly to handle
+        boolean setPS = parentSubject == base;
+        boolean setPO = parentObject == base;
+
         if (abase.contains("#")) {
             this.base = abase.substring(0, abase.indexOf("#"));
         } else {
             this.base = abase;
         }
-        // Not great, but passes tests.
-        // We want to say: if parentSubject hasn't been changed, it's base
-        if (this.original) {
-            this.parentSubject = this.base;
-        }
+
+        if (setPS) this.parentSubject = base;
+        if (setPO) this.parentObject = base;
+        
         if (parent != null) {
             parent.setBase(base);
         }
@@ -72,30 +79,92 @@ class EvalContext implements NamespaceContext {
                 );
     }
 
-    public void setNamespaceURI(String prefix, String uri) {
+    /**
+     * RDFa 1.1 prefix support
+     * @param prefix Prefix
+     * @param uri URI
+     */
+    public void setPrefix(String prefix, String uri) {
         if (uri.length() == 0) {
             uri = base;
         }
-        prefixToUri.put(prefix, uri);
+        if (prefixMap == Collections.EMPTY_MAP) prefixMap = new HashMap<String, String>();
+        prefixMap.put(prefix, uri);
     }
-
-    public String getNamespaceURI(String prefix) {
-        if (prefixToUri.containsKey(prefix)) {
-            return prefixToUri.get(prefix);
+    
+    /**
+     * RDFa 1.1 prefix support
+     * @param prefix Prefix
+     * @param uri URI
+     */
+    public void setPrefixes(Map<String, String> prefixes) {
+        if (prefixMap == Collections.EMPTY_MAP) prefixMap = new HashMap<String, String>();
+        prefixMap.putAll(prefixes);
+    }
+    
+    /**
+     * RDFa 1.1 prefix support.
+     * @param prefix
+     * @return
+     */
+    public String getURIForPrefix(String prefix) {
+        if (prefixMap.containsKey(prefix)) {
+            return prefixMap.get(prefix);
+        } else if (xmlnsMap.containsKey(prefix)) {
+            return xmlnsMap.get(prefix);
         } else if (parent != null) {
-            return parent.getNamespaceURI(prefix);
+            return parent.getURIForPrefix(prefix);
         } else {
             return null;
         }
     }
 
-    public String getPrefix(String uri) {
+    // Namespace methods
+    public void setNamespaceURI(String prefix, String uri) {
+        /*if (uri.length() == 0) {
+            uri = base;
+        }
+        if (xmlnsMap == Collections.EMPTY_MAP) xmlnsMap = new HashMap<String, String>();
+        xmlnsMap.put(prefix, uri);*/
+        setPrefix(prefix, uri);
+    }
+
+    public String getNamespaceURI(String prefix) {
+        /*if (xmlnsMap.containsKey(prefix)) {
+            return xmlnsMap.get(prefix);
+        } else if (parent != null) {
+            return parent.getNamespaceURI(prefix);
+        } else {
+            return null;
+        }*/
+        return getURIForPrefix(prefix);
+    }
+    
+    // I'm not sure about this 1.1 term business. Reuse prefix map
+    public void setTerm(String term, String uri) {
+       setPrefix(term + ":", uri);
+    }
+
+    public String getURIForTerm(String term) {
+        return getURIForPrefix(term + ":");
+    }
+
+    public String getBase() {
+        return base;
+    }
+
+    public String getVocab() {
+        return vocab;
+    }
+
+    public String getPrefix(String namespaceURI) {
         throw new UnsupportedOperationException("Not supported yet.");
     }
 
-    public Iterator getPrefixes(String uri) {
+    public Iterator getPrefixes(String namespaceURI) {
         throw new UnsupportedOperationException("Not supported yet.");
     }
+    
 }
 
 /*

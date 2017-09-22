@@ -6,12 +6,12 @@
 
 package net.rootdev.javardfa;
 
-import com.hp.hpl.jena.query.Query;
-import com.hp.hpl.jena.query.QueryFactory;
-import com.hp.hpl.jena.rdf.model.Model;
-import com.hp.hpl.jena.rdf.model.ModelFactory;
-import com.hp.hpl.jena.sparql.algebra.Algebra;
-import com.hp.hpl.jena.util.FileManager;
+import org.apache.jena.query.Query;
+import org.apache.jena.query.QueryFactory;
+import org.apache.jena.rdf.model.Model;
+import org.apache.jena.rdf.model.ModelFactory;
+import org.apache.jena.sparql.algebra.Algebra;
+import org.apache.jena.util.FileManager;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,8 +25,11 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamException;
 import net.rootdev.javardfa.ParserFactory.Format;
+import net.rootdev.javardfa.jena.JenaStatementSink;
+import net.rootdev.javardfa.query.QueryUtilities;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import org.junit.Test;
-import static org.junit.Assert.*;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
@@ -54,6 +57,7 @@ public class FileBasedTests {
         Collection<String[]> filePairs = new ArrayList<String[]>();
         String nextLine;
         while ((nextLine = reader.readLine()) != null) {
+            if (nextLine.startsWith("#")) continue;
             filePairs.add(nextLine.split("\\s+"));
         }
         return filePairs;
@@ -85,10 +89,11 @@ public class FileBasedTests {
         Model c = FileManager.get().loadModel(compareURL.toExternalForm());
         Model m = ModelFactory.createDefaultModel();
         StatementSink sink = new JenaStatementSink(m);
-        XMLReader parser = ParserFactory.createReaderForFormat(sink, Format.XHTML);
+        XMLReader parser = ParserFactory.createReaderForFormat(sink, Format.XHTML, Setting.OnePointOne);
         parser.parse(hf);
-
-        assertTrue("Files match", c.isIsomorphicWith(m));
+        boolean result = c.isIsomorphicWith(m);
+        if (!result) m.write(System.err, "TTL");
+        assertTrue("Files match (" + htmlURL + ")", result);
     }
 
     private void compareQuery(URL htmlURL, URL compareURL) throws SAXException, IOException {
@@ -101,7 +106,7 @@ public class FileBasedTests {
 
         Query qFromHTML = qs.get(qs.keySet().toArray()[0]);
 
-        assertEquals("Query matches",
+        assertEquals("Query matches (" + htmlURL + ")",
                 Algebra.compile(query),
                 Algebra.compile(qFromHTML));
     }

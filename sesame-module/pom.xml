@@ -1,15 +1,20 @@
 
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>net.rootdev</groupId>
     <artifactId>sesame-java-rdfa</artifactId>
     <packaging>jar</packaging>
-    <version>0.3-SNAPSHOT</version>
+    <version>0.4.3-SNAPSHOT</version>
     <name>sesame-java-rdfa</name>
     <description>
         A SAX-based java RDFa parser (sesame binding)
     </description>
+    <parent>
+        <groupId>net.rootdev</groupId>
+        <artifactId>java-rdfa-parent</artifactId>
+        <version>0.4.3-SNAPSHOT</version>
+        <relativePath>../java-rdfa-parent</relativePath>
+    </parent>
     <inceptionYear>2009</inceptionYear>
     <url>http://sommer.dev.java.net/sesame-java-rdfa/</url>
     <issueManagement>
@@ -111,8 +116,10 @@
                 <configuration>
                     <linksource>true</linksource>
                     <links>
-                        <link>http://java.sun.com/javase/6/docs/api/</link>
-                        <link>http://jena.sourceforge.net/javadoc/</link>
+                        <link>http://docs.oracle.com/javase/6/docs/api/</link>
+                        <link>http://jena.apache.org/documentation/javadoc/jena/</link>
+                        <link>http://jena.apache.org/documentation/javadoc/arq/</link>
+                        <link>http://www.openrdf.org/doc/sesame2/api/</link>
                     </links>
                 </configuration>
                 <executions>
@@ -148,7 +155,7 @@
         <dependency>
             <groupId>net.rootdev</groupId>
             <artifactId>java-rdfa</artifactId>
-            <version>0.3-SNAPSHOT</version>
+            <version>0.4.3-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.openrdf.sesame</groupId>
@@ -192,7 +199,7 @@
         <dependency>
             <groupId>com.hp.hpl.jena</groupId>
             <artifactId>iri</artifactId>
-            <version>0.7</version>
+            <version>0.8</version>
             <type>jar</type>
         </dependency>
         <dependency>
@@ -230,8 +237,10 @@
                 <configuration>
                     <linksource>true</linksource>
                     <links>
-                        <link>http://java.sun.com/javase/6/docs/api/</link>
-                        <link>http://jena.sourceforge.net/javadoc/</link>
+                        <link>http://docs.oracle.com/javase/6/docs/api/</link>
+                        <link>http://jena.apache.org/documentation/javadoc/jena/</link>
+                        <link>http://jena.apache.org/documentation/javadoc/arq/</link>
+                        <link>http://www.openrdf.org/doc/sesame2/api/</link>
                     </links>
                 </configuration>
             </plugin>
